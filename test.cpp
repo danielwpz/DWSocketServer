@@ -17,7 +17,7 @@ void handler(int fd, string content)
 		cout << "ERROR: write() failed.\n";
 	}
 
-	std::chrono::milliseconds dura(5 * 10);
+	std::chrono::milliseconds dura(1 * 100);
 	std::this_thread::sleep_for(dura);	
 }
 
