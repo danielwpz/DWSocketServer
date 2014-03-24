@@ -16,6 +16,14 @@
 
 using namespace std;
 
+inline void errlog()
+{
+	int __errno = errno;
+	char *str = strerror(__errno);
+
+	cout << str << endl;
+}
+
 void thread_sleep(int interval)
 {
 	std::chrono::milliseconds dura(interval);
@@ -32,6 +40,7 @@ void client_fun(int n)
 
 	for (i = 0; i < 1; i++) {
 		if ((fd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+			errlog();
 			cout << "ERROR: socket() failed.\n";
 			return;
 		}
@@ -43,12 +52,17 @@ void client_fun(int n)
 
 		if (connect(fd, (struct sockaddr *)&clientAddr,
 					sizeof(clientAddr)) == -1) {
+			errlog();
 			cout << "ERROR: connect() failed.\n";
 			return;
 		}
 
 		sprintf(buf, "[%d]Client to Server", n);
-		if (write(fd, buf, strlen(buf)) < 0) {
+		std::string str(254, '0');
+		str += '1';
+		const char *abuf = str.c_str();
+		if (write(fd, abuf, strlen(abuf)) < 0) {
+			errlog();
 			cout << "ERROR: write() failed.\n";
 			close(fd);
 			return;
@@ -60,31 +74,32 @@ void client_fun(int n)
 			rbuf[r] = '\0';
 			cout << rbuf << endl;
 		}else {
+			errlog();
 			cout << "ERROR: read() failed.\n";
 		}
 		
-		thread_sleep(100);	// 0.1s
+		thread_sleep(5000);	// 100s
 
 		sprintf(buf, "[%d]Client to Server again", n);
 		if (write(fd, buf, strlen(buf)) < 0) {
+			errlog();
 			cout << "ERROR: write() failed.\n";
 			close(fd);
 			return;
 		}
 		// cout << "write 1\n";
+		
 
 		r = read(fd, rbuf, 19);
 		if (r > 0) {
 			rbuf[r] = '\0';
 			cout << rbuf << endl;
 		}else {
+			errlog();
 			cout << "ERROR: read() failed.\n";
 		}
 
-		std::chrono::milliseconds dura(300 * 1000);
-		std::this_thread::sleep_for(dura);
-
-		thread_sleep(300 * 1000);	// 300s
+		// thread_sleep(300 * 1000);	// 300s
 
 		close(fd);
 	}
@@ -106,6 +121,8 @@ int main(int argc, char **argv)
 	try{
 		for (i = 0; i < n; i++) {
 			vec.push_back(std::thread(std::bind(&client_fun, i)));
+			if (i % 500 == 0)
+				thread_sleep(100); // 0.1s
 		}
 	}catch(std::exception e) {
 		cout << e.what() << endl;

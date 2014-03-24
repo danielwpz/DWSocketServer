@@ -25,10 +25,31 @@
 #include <string>
 #include "./ThreadPool/DWThreadPool.h"
 
+/**
+ * If you have to call sread() more than
+ * one times in handler and have no idea
+ * when the required message will arrive,
+ * use blocking mode by commenting the
+ * following line.
+ */
+// #define NONBLOCK_SOCKET		/* set sockets as non-blocking */
+
+/**
+ * If the jobs in handler are time-costing,
+ * make the TIME_COST_RATE larger.
+ *
+ * If the concurrency scale is huge,
+ * make the CONCURRENCY_RATE larger.
+ */
+#define TIME_COST_RATE		4	
+#define CONCURRENCY_RATE	2	
+
 #define E_LSN -1
 #define E_BAD_HDL -2
 
-typedef std::function<void(int, std::string)> SocketHandler;
+class DWSocketServer;
+
+typedef std::function<void(DWSocketServer *, int)> SocketHandler;
 
 class DWSocketServer 
 {
@@ -63,10 +84,11 @@ public:
 	/**
 	 * Specially-designed read and write.
 	 */
-	int sread(int fd, std::string **sptr);
+	int sread(int fd, std::string &str);
 	int swrite(int fd, const std::string &str);
 
 private:
 	void multiEpoll();
 	void sclose(int fd);
 };
+

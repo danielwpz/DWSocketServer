@@ -33,10 +33,17 @@
 #include <iostream>
 #include "DWSocketServer.h"
 
-#define EPOLL_MAX_EVENTS 128
-#define EPOLL_QUEUE_SIZE 2		/* NOT too large */
-
+#ifdef NONBLOCK_SOCKET
 #define BUF_SIZE 256
+#else
+#define BUF_SIZE 768
+#endif
+
+#define EPOLL_MAX_EVENTS 128
+#define EPOLL_QUEUE_SIZE ((8 >> TIME_COST_RATE)? \
+								(8 >> TIME_COST_RATE) : 1)
+
+#define THREAD_POOL_SIZE (DEFAULT_BURDEN_POOL_SIZE * CONCURRENCY_RATE)
 
 using namespace std;
 
@@ -67,8 +74,9 @@ DWSocketServer::DWSocketServer(short port)
 	/**
 	 * init DWThreadPool
 	 */
-	pool = new DWThreadPool(DEFAULT_BURDEN_POOL_SIZE,
-							DEFAULT_BURDEN_POOL_SIZE);
+	cout << THREAD_POOL_SIZE << endl;
+	pool = new DWThreadPool(THREAD_POOL_SIZE,
+							THREAD_POOL_SIZE);
 
 	/**
 	 * init listen socket
@@ -140,7 +148,7 @@ int DWSocketServer::startup()
 
 	// start the thread pool
 	pool->start();
-	for (i = 0; i < DEFAULT_BURDEN_POOL_SIZE; i++) {
+	for (i = 0; i < THREAD_POOL_SIZE; i++) {
 		pool->run(std::bind(&DWSocketServer::multiEpoll,
 							this));
 	}
@@ -154,12 +162,14 @@ int DWSocketServer::startup()
 			char *errmsg = strerror(errno);
 			cout << errmsg;
 			errlog("accept() error.\n");
-			break;
+			continue;
 		}
 
+#ifdef NONBLOCK_SOCKET
 		// set clientfd as non-block
 		int flags = fcntl(clientfd, F_GETFL, 0);
 		fcntl(clientfd, F_SETFL, flags | O_NONBLOCK);
+#endif
 
 		// add clientfd to epoll queue
 		ev.events = EPOLLIN | EPOLLONESHOT | EPOLLRDHUP;
@@ -205,33 +215,8 @@ void DWSocketServer::multiEpoll()
 				sclose(events[i].data.fd);
 				continue;
 			}else if (events[i].events & EPOLLIN) {
-				// read messages
-				/*
-				std::string msg;
-				while(1) {
-					while ((r = read(events[i].data.fd, 
-									buf, BUF_SIZE - 1)) > 0) {
-						buf[r] = '\0';
-						msg += buf;
-					}
-					// cout << "[" << std::this_thread::get_id() << "]";
-					// cout << "read returns " << r << endl;
-					if (r == 0) {
-						log("Opposite end is closed.\n");
-						break;
-					}else if (r < 0 && errno == EAGAIN) {
-						// There is some oncoming message to
-						// be sent, but we cannot get it now.
-						// log("read() requires AGAIN.\n");
-					}else {
-						log("ERROR: read() return -1 but not EAGAIN\n");
-						break;
-					}
-				}
-				*/
-				std::string *sptr;
-				r = sread(events[i].data.fd, &sptr);
-				cout << "read:[" << r << "]" << *sptr << endl;
+				// call the user-defined handler
+				handler(this, events[i].data.fd);
 
 				// rearm event source in epoll queue
 				ev.events = EPOLLIN | EPOLLONESHOT | EPOLLRDHUP;
@@ -241,9 +226,6 @@ void DWSocketServer::multiEpoll()
 								ev.data.fd, &ev) < 0) {
 					errlog("epoll_ctl() modify failed.\n");
 				}
-
-				handler(events[i].data.fd, *sptr);
-				delete sptr;
 			}else {
 				// TODO break or err
 			}
@@ -252,47 +234,74 @@ void DWSocketServer::multiEpoll()
 
 }
 
-int DWSocketServer::sread(int fd, std::string **sptr)
+/**
+ * non-blocking mode:
+ *	 sread() works fine with non-block socket.
+ *	 But if you call it not after epoll_wait(),
+ *	 you have to make sure that there is some-
+ *	 thing really in the buffer and can be read.
+ *	 If you believe the message could be delivered
+ *	 in very short period of time, just spin it.
+ *
+ * blocking mode:
+ *   sread() works almost fine with blocking mode.
+ *   By 'almost', I meant that in this case sread()
+ *   will return as soon as it got (BUF_SIZE - 1)
+ *   bytes, regardless of any pending message.
+ *   So, set the BUF_SIZE a litter bit larger.
+ *   
+ * Returns:
+ *   > 0 - number of bytes actually read
+ *   = 0 - nothing has been read (non-blocking only)
+ *   < 0 - error happened
+ */ 
+int DWSocketServer::sread(int fd, std::string &str)
 {
-	int r;
+	int r, cnt;
 	char buf[BUF_SIZE];
-	std::string *str = new std::string();
+	cnt = 0;
 
 	while(1) {
 		r = read(fd, buf, BUF_SIZE - 1);
 
-		if (r == BUF_SIZE - 1) {
-			buf[r] = '\0';
-			str->append(buf);
-		}else if (r > 0 && r < BUF_SIZE - 1) {
+		if (r > 0 && r < BUF_SIZE - 1) {
 			// terminate
+			cnt += r;
 			buf[r] = '\0';
-			str->append(buf);
-			r = 0;
+			str.append(buf);
 			break;
+		}else if (r == BUF_SIZE - 1) {
+			cnt += r;
+			buf[r] = '\0';
+			str.append(buf);
+#ifndef NONBLOCK_SOCKET
+			break;
+#endif
 		}else if (r < 0 && errno == EAGAIN) {
-			r = 0;
 			break;
 		}else if (r < 0) {
-			r = -1;
+			cnt = -1;
 			break;
 		}else if (r == 0) {
-			sclose(fd);
-			r = -1;
+			cnt = -1;
 			break;
 		}
 	}
 
-	*sptr = str;
-
-	return r;
+	return cnt;
 }
 
 int DWSocketServer::swrite(int fd, const std::string &str)
 {
+	int r;
 	const char *buf = str.c_str();
 
-	return (write(fd, buf, str.length()));
+	r = write(fd, buf, str.length());
+	if (r < 0) {
+		errlog("ERROR: write failed.\n");
+	}
+
+	return r;
 }
 
 void DWSocketServer::sclose(int fd)
